@@ -155,6 +155,28 @@ def test_reshape_input_validation():
         pt.reshape(x, (-1, -1, 3))
 
 
+def test_concatenate_input_validation():
+    namespace = pt.Namespace()
+
+    x = pt.make_placeholder(namespace, name="x", shape=(10, 10), dtype=np.float)
+    y = pt.make_placeholder(namespace, name="y", shape=(1, 10), dtype=np.float)
+
+    assert pt.concatenate((x, x, x), axis=0).shape == (30, 10)
+    assert pt.concatenate((x, y), axis=0).shape == (11, 10)
+
+    pt.concatenate((x,), axis=0)
+    pt.concatenate((x,), axis=1)
+
+    with pytest.raises(ValueError):
+        pt.concatenate(())
+
+    with pytest.raises(ValueError):
+        pt.concatenate((x, y), axis=1)
+
+    with pytest.raises(ValueError):
+        pt.concatenate((x, x), axis=3)
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         exec(sys.argv[1])

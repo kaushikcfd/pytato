@@ -38,7 +38,7 @@ from pytato.array import (
         Array, DictOfNamedArrays, ShapeType, IndexLambda,
         SizeParam, DataWrapper, InputArgumentBase, MatrixProduct, Roll,
         AxisPermutation, Slice, IndexRemappingBase, Stack, Placeholder,
-        Reshape, Namespace, DataInterface)
+        Reshape, Concatenate, Namespace, DataInterface, AxisLenType)
 from pytato.program import BoundProgram
 from pytato.target import Target, PyOpenCLTarget
 import pytato.scalar_expr as scalar_expr
@@ -110,6 +110,7 @@ class CodeGenPreprocessor(CopyMapper):
     :class:`~pytato.array.AxisPermutation`  :class:`~pytato.array.IndexLambda`
     :class:`~pytato.array.Slice`            :class:`~pytato.array.IndexLambda`
     :class:`~pytato.array.Reshape`          :class:`~pytato.array.IndexLambda`
+    :class:`~pytato.array.Concatenate`      :class:`~pytato.array.IndexLambda`
     ======================================  =====================================
     """
 
@@ -155,6 +156,52 @@ class CodeGenPreprocessor(CopyMapper):
                 stack_expr = If(Comparison(var(f"_{expr.axis}"), "==", i),
                         subarray_expr,
                         stack_expr)
+
+        bindings = {f"_in{i}": self.rec(array)
+                for i, array in enumerate(expr.arrays)}
+
+        return IndexLambda(namespace=self.namespace,
+                expr=stack_expr,
+                shape=expr.shape,
+                dtype=expr.dtype,
+                bindings=bindings)
+
+    def map_concatenate(self, expr: Concatenate) -> Array:
+        from pymbolic.primitives import If, Comparison, Subscript
+
+        def get_subscript(array_index: int, offset: ScalarExpression) -> Subscript:
+            aggregate = var(f"_in{array_index}")
+            index = [var(f"_{i}") if i != expr.axis else (var(f"_{i}") - offset)
+                     for i in range(len(expr.shape))]
+            return Subscript(aggregate, tuple(index))
+
+        lbounds: List[AxisLenType] = [0]
+        ubounds: List[AxisLenType] = [
+                expr.arrays[0].shape[expr.axis]]
+
+        for i, array in enumerate(expr.arrays[1:], start=1):
+            ubounds.append(ubounds[i-1]+array.shape[expr.axis])
+            lbounds.append(ubounds[i-1])
+
+        # I = axis index
+        #
+        # => If(0<=_I < arrays[0].shape[axis],
+        #        _in0[_0, _1, ..., _I, ...],
+        #        If(arrays[0].shape[axis]<= _I < (arrays[1].shape[axis]
+        #                                         +arrays[0].shape[axis]),
+        #            _in1[_0, _1, ..., _I-arrays[0].shape[axis], ...],
+        #            ...
+        #                _inNm1[_0, _1, ...] ...))
+        for i in range(len(expr.arrays) - 1, -1, -1):
+            lbound, ubound = lbounds[i], ubounds[i]
+            subarray_expr = get_subscript(i, lbound)
+            if i == len(expr.arrays) - 1:
+                stack_expr = subarray_expr
+            else:
+                stack_expr = If(Comparison(var(f"_{expr.axis}"), ">=", lbound)
+                                and Comparison(var(f"_{expr.axis}"), "<", ubound),
+                                subarray_expr,
+                                stack_expr)
 
         bindings = {f"_in{i}": self.rec(array)
                 for i, array in enumerate(expr.arrays)}
@@ -605,9 +652,9 @@ class InlinedExpressionGenMapper(scalar_expr.IdentityMapper):
     def map_call(self, expr: prim.Call,
             expr_context: LoopyExpressionContext) -> ScalarExpression:
         from pymbolic import parse
-        if expr.function == parse('pytato.c99.exp'):
+        if expr.function == parse("pytato.c99.exp"):
             params = self.rec(expr.parameters, expr_context)
-            return prim.Call(prim.Variable('exp'), params)
+            return prim.Call(prim.Variable("exp"), params)
         else:
             raise NotImplementedError
 
