@@ -610,7 +610,7 @@ class Array:
             dtype = get_result_type(self.dtype, other.dtype)
 
         else:
-            raise ValueError("unknown argument")
+            raise ValueError(f"unknown argument of type '{type(other)}'")
 
         if reverse:
             first_expr, second_expr = second_expr, first_expr
