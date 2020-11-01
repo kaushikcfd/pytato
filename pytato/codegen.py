@@ -602,6 +602,15 @@ class InlinedExpressionGenMapper(scalar_expr.IdentityMapper):
                     expr_context.state)
             return impl_result.to_loopy_expression((), expr_context)
 
+    def map_call(self, expr: prim.Call,
+            expr_context: LoopyExpressionContext) -> ScalarExpression:
+        from pymbolic import parse
+        if expr.function == parse('pytato.c99.exp'):
+            params = self.rec(expr.parameters, expr_context)
+            return prim.Call(prim.Variable('exp'), params)
+        else:
+            raise NotImplementedError
+
 # }}}
 
 
