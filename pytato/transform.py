@@ -24,7 +24,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 """
 
-from typing import Any, Callable, Dict, FrozenSet
+from typing import Any, Callable, Dict, FrozenSet, Optional
 
 from pytato.array import (
         Array, IndexLambda, Namespace, Placeholder, MatrixProduct, Stack,
@@ -201,15 +201,20 @@ class DependencyMapper(Mapper):
 # {{{ mapper frontends
 
 def copy_namespace(source_namespace: Namespace,
-        copy_mapper: CopyMapper) -> Namespace:
+        copy_mapper: CopyMapper, onlynames: Optional[FrozenSet[str]]) -> Namespace:
     """Copy the elements of *namespace* into a new namespace.
 
     :param source_namespace: The namespace to copy
     :param copy_mapper: A mapper that performs copies into a new namespace
+    :param onlynames: Elements of *namespace* that are to be copied into the
+        new namespace. All elements are copied if *onlynames=None*,
     :returns: A new namespace containing copies of the items in *source_namespace*
     """
-    for name, val in source_namespace.items():
-        mapped_val = copy_mapper(val)
+    if onlynames is None:
+        onlynames = frozenset(source_namespace.keys())
+
+    for name in onlynames:
+        mapped_val = copy_mapper(source_namespace[name])
         if name not in copy_mapper.namespace:
             copy_mapper.namespace.assign(name, mapped_val)
     return copy_mapper.namespace
@@ -228,8 +233,10 @@ def copy_dict_of_named_arrays(source_dict: DictOfNamedArrays,
     if not source_dict:
         return DictOfNamedArrays({})
 
+    deps = get_dependencies(source_dict)
+
     data = {}
-    copy_namespace(source_dict.namespace, copy_mapper)
+    copy_namespace(source_dict.namespace, copy_mapper, deps)
     for name, val in source_dict.items():
         data[name] = copy_mapper(val)
     return DictOfNamedArrays(data)

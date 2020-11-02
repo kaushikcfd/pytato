@@ -947,12 +947,6 @@ def generate_loopy(result: Union[Array, DictOfNamedArrays],
         # replace "expr" with the created stored variable
         state.results[expr] = StoredResult(name, expr.ndim, frozenset([insn_id]))
 
-    knl = state.kernel
-
-    new_args = [arg for arg in state.kernel.args
-            if arg.name in (knl.get_written_variables() | knl.get_read_variables())]
-    new_knl = state.kernel.copy(args=new_args)
-
     return target.bind_program(
-            program=new_knl,
+            program=state.kernel,
             bound_arguments=preproc_result.bound_arguments)
