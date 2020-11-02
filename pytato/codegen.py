@@ -651,8 +651,7 @@ class InlinedExpressionGenMapper(scalar_expr.IdentityMapper):
 
     def map_call(self, expr: prim.Call,
             expr_context: LoopyExpressionContext) -> ScalarExpression:
-        from pymbolic import parse
-        if expr.function == parse("pytato.c99.exp"):
+        if expr.function.name == "pytato.c99.exp":
             params = self.rec(expr.parameters, expr_context)
             return prim.Call(prim.Variable("exp"), params)
         else:
@@ -838,7 +837,7 @@ def normalize_outputs(result: Union[Array, DictOfNamedArrays]) -> DictOfNamedArr
     """
     if not isinstance(result, (Array, DictOfNamedArrays)):
         raise TypeError("outputs of the computation should be "
-                "either an Array or a DictOfNamedArrays")
+                f"either an Array or a DictOfNamedArrays, got {type(result)}")
 
     if isinstance(result, Array):
         outputs = DictOfNamedArrays({"_pt_out": result})
