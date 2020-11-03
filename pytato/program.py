@@ -52,7 +52,7 @@ class BoundProgram:
 
     .. attribute:: program
 
-        The underlying :class:`loopy.LoopKernel`.
+        The underlying :class:`loopy.Program`.
 
     .. attribute:: target
 
@@ -65,12 +65,16 @@ class BoundProgram:
     .. automethod:: __call__
     """
 
-    program: "loopy.LoopKernel"
+    program: "loopy.Program"
     bound_arguments: Mapping[str, Any]
     target: "pytato.target.Target"
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         raise NotImplementedError
+
+    @property
+    def kernel(self) -> "loopy.LoopKernel":
+        return self.program["_pt_kernel"]
 
 
 @dataclass(init=True, repr=False, eq=False)
