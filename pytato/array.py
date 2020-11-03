@@ -144,7 +144,7 @@ from numbers import Number
 import operator
 from typing import (
         Optional, Callable, ClassVar, Dict, Any, Mapping, Iterator, Tuple, Union,
-        Protocol, Sequence, cast, TYPE_CHECKING)
+        Protocol, Sequence, cast, TYPE_CHECKING, Iterable)
 
 import numpy as np
 import pymbolic.primitives as prim
@@ -154,6 +154,8 @@ from pytools.tag import Tag, UniqueTag, TagsType, tag_dataclass
 
 import pytato.scalar_expr as scalar_expr
 from pytato.scalar_expr import ScalarExpression
+
+import loopy as lp
 
 
 # Get a type variable that represents the type of '...'
@@ -1155,6 +1157,51 @@ class Reshape(IndexRemappingBase):
 # }}}
 
 
+# {{{ call_loopy
+
+class LoopyCall:
+
+    def __init__(self,
+            program: lp.Program,
+            bindings: Dict[str, Array],
+            results: Frozenset[str],
+            entrypoint: str):
+        # FIXME: Give type/shape hints to program from bindings
+        self.program = lp.preprocess_program(program)
+
+    @memoize_method
+    def _get_call_loopy_result(self, res_name):
+        return LoopyCallResult(self, res_name)
+
+    def __getattr__(self, key):
+        if key in self.results:
+            return self._get_call_loopy_result(key)
+
+        return super().__getattr__(key)
+
+
+class LoopyCallResult(Array):
+    """
+    """
+
+    def __init__(self,
+            call_loopy: CallLoopy,
+            result_name: str,
+            tags: Optional[TagsType] = None):
+        ...
+
+    @property
+    def shape(self):
+        ...
+
+    @property
+    def dtype(self):
+        ...
+
+
+# }}}
+
+
 # {{{ slice
 
 class Slice(IndexRemappingBase):
@@ -1580,6 +1627,38 @@ def reshape(array: Array, newshape: Sequence[int]) -> Array:
                 f" into {newshape}")
 
     return Reshape(array, tuple(newshape_sans_minus_1))
+
+
+def call_loopy(program: lp.Program, bindings: dict, results: Iterable[str],
+        entrypoint: Optional[str] = None):
+    """
+    Operates a general :class:`loopy.Program` on the array inputs as specified
+    by *bindings*.
+
+    Restrictions on the structure of ``program[entrypoint]``:
+
+    * array arguments of ``program[entrypoint]`` should either be either
+      input-only or output-only.
+    * all input-only arguments of ``program[entrypoint]`` must appear in
+      *bindings*.
+    * all output-only arguments of ``program[entrypoint]`` must appear in
+      *bindings*.
+    * if *program* has been declared with multiple entrypoints, *entrypoint*
+      can not be *None*.
+
+    :arg bindings: mapping from argument names of ``program[entrypoint]`` to
+        :class:`pytato.array.Array`.
+    :arg results: names of ``program[entrypoint]`` argument names that have to
+        be returned from the call.
+    """
+    # FIXME: Sanity checks
+    if entrypoint is None:
+         if len(program.entrypoints) != 1:
+             raise ValueError("cannot infer entrypoint")
+
+         entrypoint, = program.entrypoints
+
+     return LoopyCall(program, bindings, frozenset(results), entrypoint)
 
 
 def make_dict_of_named_arrays(data: Dict[str, Array]) -> DictOfNamedArrays:
