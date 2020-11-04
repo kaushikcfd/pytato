@@ -144,7 +144,7 @@ from numbers import Number
 import operator
 from typing import (
         Optional, Callable, ClassVar, Dict, Any, Mapping, Iterator, Tuple, Union,
-        Protocol, Sequence, cast, TYPE_CHECKING, Iterable)
+        Protocol, Sequence, cast, TYPE_CHECKING, Iterable, FrozenSet)
 
 import numpy as np
 import pymbolic.primitives as prim
@@ -1159,45 +1159,97 @@ class Reshape(IndexRemappingBase):
 
 # {{{ call_loopy
 
-class LoopyCall:
+def _add_arg_shapes_and_types(knl, bindings):
+    """
+    1. Should lie in loopy as "add_and_infer_arg_descr"
+    2. Should take care about symbolic shape expressions.
+    """
+    assert isinstance(knl, lp.LoopKernel)
+    new_lp_arg_dict = knl.arg_dict.copy()
+    for arg_name, pt_arg in bindings.items():
+        assert all(isinstance(axis_len, int) for axis_len in pt_arg.shape)
+        assert isinstance(pt_arg, Array)  # since symbolic shapes are not allowed yet
+        # FIXME: we should also scream if the "knl" provided is incompatible
+        # with the give input
+        lp_arg = knl.arg_dict[arg_name]
+        lp_arg = lp_arg.copy(shape=pt_arg.shape,
+                             dtype=pt_arg.dtype,
+                             strides=lp.auto)
+        new_lp_arg_dict[arg_name] = lp_arg
+
+    return knl.copy(args=[new_lp_arg_dict[arg.name] for arg in knl.args])
+
+
+class LoopyFunction(DictOfNamedArrays):
+    """
+    .. note::
+
+        This should allow both a locally stored kernel
+        and one that's obtained by importing a dotted
+        name.
+    """
 
     def __init__(self,
+            namespace: Namespace,
             program: lp.Program,
             bindings: Dict[str, Array],
-            results: Frozenset[str],
+            results: FrozenSet[str],
             entrypoint: str):
-        # FIXME: Give type/shape hints to program from bindings
+        super().__init__({})
+        self._data = {res: LoopyFunctionResult(self, res)
+                      for res in results}
+
+        program = program.with_kernel(_add_arg_shapes_and_types(program[entrypoint],
+                                                                bindings))
         self.program = lp.preprocess_program(program)
+        self.results = results
+        self.bindings = bindings
+        self.entrypoint = entrypoint
+        self._namespace = namespace
 
-    @memoize_method
-    def _get_call_loopy_result(self, res_name):
-        return LoopyCallResult(self, res_name)
+    @property
+    def namespace(self) -> Namespace:
+        return self._namespace
 
-    def __getattr__(self, key):
-        if key in self.results:
-            return self._get_call_loopy_result(key)
+    @property
+    def entrykernel(self) -> lp.LoopKernel:
+        return self.program[self.entrypoint]
 
-        return super().__getattr__(key)
+    def __hash__(self):
+        from loopy.tools import LoopyKeyBuilder as lkb
+        return hash((lkb()(self.program), tuple(self.bindings), self.results))
 
 
-class LoopyCallResult(Array):
+class LoopyFunctionResult(Array):
     """
     """
+    _fields = Array._fields + ("loopyfunction", "name")
+    _mapper_method = "map_loopyfunction_result"
 
     def __init__(self,
-            call_loopy: CallLoopy,
-            result_name: str,
+            loopyfunction: LoopyFunction,
+            name: str,
             tags: Optional[TagsType] = None):
-        ...
+
+        super().__init__(tags)
+        self.loopyfunction = loopyfunction
+        self.name = name
 
     @property
-    def shape(self):
-        ...
+    def namespace(self) -> Namespace:
+        return self.loopyfunction.namespace
 
     @property
-    def dtype(self):
-        ...
+    def loopyarg(self) -> lp.ArrayArg:
+        return self.loopyfunction.entrykernel.arg_dict[self.name]
 
+    @property
+    def shape(self) -> ShapeType:
+        return self.loopyarg.shape
+
+    @property
+    def dtype(self) -> np.dtype:
+        return self.loopyarg.dtype
 
 # }}}
 
@@ -1386,20 +1438,6 @@ class SizeParam(InputArgumentBase):
     @property
     def dtype(self) -> np.dtype:
         return np.dtype(np.intp)
-
-# }}}
-
-
-# {{{ loopy function
-
-class LoopyFunction(DictOfNamedArrays):
-    """
-    .. note::
-
-        This should allow both a locally stored kernel
-        and one that's obtained by importing a dotted
-        name.
-    """
 
 # }}}
 
@@ -1629,8 +1667,8 @@ def reshape(array: Array, newshape: Sequence[int]) -> Array:
     return Reshape(array, tuple(newshape_sans_minus_1))
 
 
-def call_loopy(program: lp.Program, bindings: dict, results: Iterable[str],
-        entrypoint: Optional[str] = None):
+def call_loopy(namespace: Namespace, program: lp.Program, bindings: dict,
+        results: Iterable[str], entrypoint: Optional[str] = None):
     """
     Operates a general :class:`loopy.Program` on the array inputs as specified
     by *bindings*.
@@ -1653,12 +1691,13 @@ def call_loopy(program: lp.Program, bindings: dict, results: Iterable[str],
     """
     # FIXME: Sanity checks
     if entrypoint is None:
-         if len(program.entrypoints) != 1:
-             raise ValueError("cannot infer entrypoint")
+        if len(program.entrypoints) != 1:
+            raise ValueError("cannot infer entrypoint")
 
-         entrypoint, = program.entrypoints
+        entrypoint, = program.entrypoints
 
-     return LoopyCall(program, bindings, frozenset(results), entrypoint)
+    return LoopyFunction(namespace, program, bindings,
+                         frozenset(results), entrypoint)
 
 
 def make_dict_of_named_arrays(data: Dict[str, Array]) -> DictOfNamedArrays:

@@ -38,7 +38,8 @@ from pytato.array import (
         Array, DictOfNamedArrays, ShapeType, IndexLambda,
         SizeParam, DataWrapper, InputArgumentBase, MatrixProduct, Roll,
         AxisPermutation, Slice, IndexRemappingBase, Stack, Placeholder,
-        Reshape, Concatenate, Namespace, DataInterface, AxisLenType)
+        Reshape, Concatenate, Namespace, DataInterface, AxisLenType,
+        LoopyFunctionResult)
 from pytato.program import BoundProgram
 from pytato.target import Target, PyOpenCLTarget
 import pytato.scalar_expr as scalar_expr
@@ -121,6 +122,7 @@ class CodeGenPreprocessor(CopyMapper):
     def __init__(self, namespace: Namespace):
         super().__init__(namespace)
         self.bound_arguments: Dict[str, DataInterface] = {}
+        self.temporaries: FrozenSet[str] = set()
 
     def map_data_wrapper(self, expr: DataWrapper) -> Array:
         self.bound_arguments[expr.name] = expr.data
@@ -129,6 +131,12 @@ class CodeGenPreprocessor(CopyMapper):
                 shape=expr.shape,
                 dtype=expr.dtype,
                 tags=expr.tags)
+
+    def map_loopyfunction_result(self, expr: DataWrapper) -> Array:
+        self.bound_arguments[expr.name] = expr.data
+        return LoopyFunctionResult(loopyfunction=expr.loopyfunction,
+                                   name=expr.name,
+                                   tags=expr.tags)
 
     def map_stack(self, expr: Stack) -> Array:
 
@@ -929,6 +937,8 @@ def generate_loopy(result: Union[Array, DictOfNamedArrays],
 
     if target is None:
         target = PyOpenCLTarget()
+
+    # establish dependencies between the dict of arrays.
 
     preproc_result = preprocess(orig_outputs)
     outputs = preproc_result.outputs
