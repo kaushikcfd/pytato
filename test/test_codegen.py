@@ -415,7 +415,7 @@ def test_dict_of_named_array_codegen_avoids_recomputation():
 
     yz = pt.DictOfNamedArrays({"y": y, "z": z})
 
-    knl = pt.generate_loopy(yz).program
+    knl = pt.generate_loopy(yz).kernel
     assert ("y" in knl.id_to_insn["z_store"].read_dependency_names())
 
 

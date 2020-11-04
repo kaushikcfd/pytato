@@ -29,7 +29,7 @@ from typing import Any, Callable, Dict, FrozenSet, Optional
 from pytato.array import (
         Array, IndexLambda, Namespace, Placeholder, MatrixProduct, Stack,
         Roll, AxisPermutation, Slice, DataWrapper, SizeParam,
-        DictOfNamedArrays, LoopyFunctionResult)
+        DictOfNamedArrays, Reshape, Concatenate, LoopyFunctionResult)
 
 __doc__ = """
 .. currentmodule:: pytato.transform
@@ -195,6 +195,13 @@ class DependencyMapper(Mapper):
     def map_slice(self, expr: Slice) -> FrozenSet[Array]:
         return self.combine(frozenset([expr]), self.rec(expr.array))
 
+    def map_reshape(self, expr: Reshape) -> FrozenSet[Array]:
+        return self.combine(frozenset([expr]), self.rec(expr.array))
+
+    def map_concatenate(self, expr: Concatenate) -> FrozenSet[Array]:
+        return self.combine(frozenset([expr]), *(self.rec(ary)
+                                                 for ary in expr.arrays))
+
     def map_loopyfunction_result(self, expr: LoopyFunctionResult) -> FrozenSet[str]:
         return self.combine(frozenset([expr]), *(self.rec(bnd)
                                                  for bnd in expr.bindings.values()))
@@ -235,13 +242,23 @@ def copy_dict_of_named_arrays(source_dict: DictOfNamedArrays,
     :returns: A new :class:`~pytato.DictOfNamedArrays` containing copies of the
         items in *source_dict*
     """
+    from pytato.scalar_expr import get_dependencies as get_scalar_expr_deps
+
     if not source_dict:
         return DictOfNamedArrays({})
 
-    deps = get_dependencies(source_dict)
+    # {{{ extract dependencies elements of the namespace
+
+    deps = set().union(*list(get_dependencies(source_dict).values()))
+    dep_names = (set([dep.name
+                      for dep in deps
+                      if isinstance(dep, (SizeParam, Placeholder, DataWrapper))])
+                  | get_scalar_expr_deps([dep.shape for dep in deps]))
+
+    # }}}
 
     data = {}
-    copy_namespace(source_dict.namespace, copy_mapper, deps)
+    copy_namespace(source_dict.namespace, copy_mapper, dep_names)
     for name, val in source_dict.items():
         data[name] = copy_mapper(val)
     return DictOfNamedArrays(data)
