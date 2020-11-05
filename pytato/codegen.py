@@ -133,7 +133,6 @@ class CodeGenPreprocessor(CopyMapper):
                 tags=expr.tags)
 
     def map_loopyfunction_result(self, expr: DataWrapper) -> Array:
-        self.bound_arguments[expr.name] = expr.data
         return LoopyFunctionResult(loopyfunction=expr.loopyfunction,
                                    name=expr.name,
                                    tags=expr.tags)
@@ -398,6 +397,19 @@ class StoredResult(ImplementedResult):
             return prim.Variable(self.name)[indices]
 
 
+class PreemptiveStoreResult(ImplementedResult):
+    """
+    An expression which was preemptively stored, probably because the
+    expression led to multiple assignees. (for ex. a function call)
+
+    :attribute name: Variable used to store the result.
+    :attribute insn_id: Variable used to store the result.
+    """
+    def __init__(self, name: str, insn_id: str):
+        self.name = name
+        self.insn_id = insn_id
+
+
 class InlinedResult(ImplementedResult):
     """An array expression generated as a :mod:`loopy` expression containing inlined
     sub-expressions.
@@ -471,6 +483,12 @@ class CodeGenState:
         A mapping from :class:`pytato.Array` instances to
         instances of :class:`ImplementedResult`.
 
+    .. attribute:: preemptive_stores
+
+        A mapping from :class:`pytato.Array` to instances of
+        :class:`str` of the instruction ids which have already stored the
+        result into an expression.
+
     .. attribute:: var_name_gen
     .. attribute:: insn_id_gen
 
@@ -479,6 +497,7 @@ class CodeGenState:
     namespace: Mapping[str, Array]
     _program: lp.Program
     results: Dict[Array, ImplementedResult]
+    preemptive_stores: Dict[Array, PreemptiveStoreResult]
 
     var_name_gen: pytools.UniqueNameGenerator = dataclasses.field(init=False)
     insn_id_gen: pytools.UniqueNameGenerator = dataclasses.field(init=False)
@@ -497,6 +516,9 @@ class CodeGenState:
 
     def update_kernel(self, kernel: lp.LoopKernel) -> None:
         self._program = self._program.with_kernel(kernel)
+
+    def update_program(self, program: lp.Program) -> None:
+        self._program = program
 
 
 class CodeGenMapper(Mapper):
@@ -610,6 +632,14 @@ class CodeGenMapper(Mapper):
 
         result = InlinedResult.from_loopy_expression(loopy_expr,
                 loopy_expr_context)
+        state.results[expr] = result
+        return result
+
+    def map_loopyfunction_result(self, expr: LoopyFunctionResult,
+            state: CodeGenState) -> ImplementedResult:
+
+
+        import pudb; pu.db
         state.results[expr] = result
         return result
 
@@ -742,6 +772,108 @@ def domain_for_shape(dim_names: Tuple[str, ...],
     return dom
 
 
+def substitute_preemptive_store(name: str,
+        preemptive_store: PreemptiveStoreResult,
+        state: CodeGenState, output_to_temporary: bool):
+    from loopy.symbolic import SubstitutionMapper
+    from pymbolic.mapper.substitutor import make_subst_func
+
+    kernel = state.kernel
+
+    # {{{ substitute exprs
+
+    subst_mapper = SubstitutionMapper(
+            make_subst_func({preemptive_store.name: name}))
+
+    new_insns = [insn.with_transformed_expressions(subst_mapper)
+                 for insn in kernel.instructions]
+
+    # }}}
+
+    old_tv = kernel.temporary_variables.pop(preemptive_store.name)
+    temporary_variables = kernel.temporary_variables.copy()
+
+    if output_to_temporary:
+        temporary_variables[name] = old_tv.copy(name=name)
+        kernel = kernel.copy(temporary_variables=temporary_variables,
+                             instructions=new_insns)
+    else:
+        arg = lp.GlobalArg(name,
+                shape=old_tv.shape,
+                dtype=old_tv.dtype,
+                order="C",
+                is_output_only=True)
+        kernel = kernel.copy(args=kernel.args + [arg],
+                             temporary_variables=temporary_variables,
+                             instructions=new_insns)
+
+    state.update_kernel(kernel)
+    return preemptive_store.insn_id
+
+
+def store_loopy_kernel_function():
+    from loopy.kernel.instruction import make_assignment
+    from loopy.symbolic import SubArrayRef
+
+    loopyfunction = expr.loopyfunction
+    callee_kernel = loopyfunction.entrykernel
+    state.update_program(lp.register_callable_kernel(state.program,
+                                                     callee_kernel))
+
+    domains = []
+    depends_on = set()
+
+    # {{{ compute assignees
+
+    def _get_assignee(res):
+        if res == expr:
+            assignee_name = res.name
+        else:
+            assignee_name = self.name_gen("_pt_cgen_temp")
+
+        inames = tuple(
+                state.var_name_gen(f"{callee_kernel.name}_{res.name}_dim{d}")
+                for d in range(res.ndim))
+
+        domains.append(domain_for_shape(inames, res.shape, {}))
+
+        return SubArrayRef(prim.Subscript(var(assignee_name), inames), inames)
+
+    assignees = [_get_assignee(loopyfunction.results[arg.name])
+                for arg in callee_kernel.args
+                if arg.name in loopyfunction.results]
+
+    # }}}
+
+    # {{{ params
+
+    def _get_par(par, kw):
+        assert isinstance(state.results[par], StoredResult)
+        depends_on.update(state.results[par].depends_on)
+
+        inames = tuple(
+                state.var_name_gen(f"{callee_kernel.name}_{kw}_dim{d}")
+                for d in range(par.ndim))
+
+        domains.append(domain_for_shape(inames, par.shape, {}))
+
+        return SubArrayRef(prim.Subscript(var(state.results[par].name), inames),
+                           inames)
+
+    call_kwargs = {kw: _get_par(par, kw)
+                   for par, kw in expr.loopyfunction.bindings.items()}
+
+    # }}}
+
+    new_insn = make_assignment(assignees,
+            prim.CallWithKwargs(var(loopyfunction.name), kwargs=call_kwargs))
+
+    result = StoredResult(expr.name, expr.ndim, frozenset([new_insn.id]))
+
+    state.results[expr] = result
+    return result
+
+
 def add_store(name: str, expr: Array, result: ImplementedResult,
        state: CodeGenState, output_to_temporary: bool = False) -> str:
     """Add an instruction that stores to a variable in the kernel.
@@ -755,6 +887,11 @@ def add_store(name: str, expr: Array, result: ImplementedResult,
 
     :returns: the id of the generated instruction
     """
+    if expr in state.preemptive_stores:
+        oldresult = state.preemptive_stores.pop(expr)
+        return substitute_preemptive_store(name, oldresult, state,
+                output_to_temporary)
+
     # Get expression.
     inames = tuple(
             state.var_name_gen(f"{name}_dim{d}")
@@ -874,12 +1011,14 @@ def get_initial_codegen_state(namespace: Namespace, target: Target,
 
     return CodeGenState(namespace=namespace,
             _program=kernel,
-            results=dict())
+            results=dict(),
+            preemptive_stores={})
 
 
 @dataclasses.dataclass(init=True, repr=False, eq=False)
 class PreprocessResult:
-    outputs: DictOfNamedArrays
+    stores: DictOfNamedArrays
+    outputnames: FrozenSet[str]
     compute_order: Tuple[str, ...]
     bound_arguments: Dict[str, DataInterface]
 
@@ -888,35 +1027,64 @@ def preprocess(outputs: DictOfNamedArrays) -> PreprocessResult:
     """Preprocess a computation for code generation."""
     from pytato.transform import copy_dict_of_named_arrays, get_dependencies
 
+    # {{{ function calls
+
+    # implementation: the function calls are invoked as is, without any
+    # modifications to the user provided kernel => must choose a name for the
+    # storage of its outputs and args
+
+    stores_dict = outputs._data.copy()
+    output_deps = get_dependencies(outputs)
+
+    ns = outputs.namespace
+
+    all_deps = frozenset().union(*(output_deps.values()))
+
+    for dep in all_deps:
+        if isinstance(dep, LoopyFunctionResult):
+            # store the result
+            if dep not in stores_dict.values():
+                stores_dict[ns.name_gen("_pt_temp")] = dep
+
+            # store the args
+            for arg in dep.loopyfunction.bindings.values():
+                if arg not in stores_dict.values():
+                    stores_dict[ns.name_gen("_pt_temp")] = arg
+
+    stores = DictOfNamedArrays(stores_dict)
+
+    del stores_dict
+
+    # }}}
+
     # {{{ compute the order in which the outputs must be computed
 
     # semantically order does not matter, but doing a toposort ordering of the
     # outputs leads to a FLOP optimal choice
-
     from pytools.graph import compute_topological_order
 
-    deps = get_dependencies(outputs)
+    store_deps = get_dependencies(stores)
 
-    # only look for dependencies between the outputs
-    deps = {name: (val & frozenset(outputs.values()))
-            for name, val in deps.items()}
+    # only look for dependencies between the stores
+    store_to_name = {store: name for name, store in stores.items()}
+    dag = {name: {store_to_name[store]
+                  for store in (deps & set(stores.values()) - {stores[name]})}
+           for name, deps in store_deps.items()}
 
-    # represent deps in terms of output names
-    output_to_name = {output: name for name, output in outputs.items()}
-    dag = {name: (frozenset([output_to_name[output] for output in val])
-                  - frozenset([name]))
-           for name, val in deps.items()}
+    compute_order: List[Array] = compute_topological_order(dag)[::-1]
 
-    output_order: List[str] = compute_topological_order(dag)[::-1]
+    del store_to_name
 
     # }}}
 
     mapper = CodeGenPreprocessor(Namespace())
 
-    new_outputs = copy_dict_of_named_arrays(outputs, mapper)
+    new_stores = copy_dict_of_named_arrays(stores, mapper)
 
-    return PreprocessResult(outputs=new_outputs,
-            compute_order=tuple(output_order),
+    return PreprocessResult(
+            stores=new_stores,
+            outputnames=frozenset(outputs.keys()),
+            compute_order=tuple(compute_order),
             bound_arguments=mapper.bound_arguments)
 
 # }}}
@@ -941,9 +1109,10 @@ def generate_loopy(result: Union[Array, DictOfNamedArrays],
     # establish dependencies between the dict of arrays.
 
     preproc_result = preprocess(orig_outputs)
-    outputs = preproc_result.outputs
+    stores = preproc_result.stores
+    outputnames = preproc_result.outputnames
     compute_order = preproc_result.compute_order
-    namespace = outputs.namespace
+    namespace = stores.namespace
 
     state = get_initial_codegen_state(namespace, target, options)
 
@@ -951,7 +1120,7 @@ def generate_loopy(result: Union[Array, DictOfNamedArrays],
     for val in namespace.values():
         if isinstance(val, InputArgumentBase):
             state.var_name_gen.add_name(val.name)
-    state.var_name_gen.add_names(outputs)
+    state.var_name_gen.add_names(stores)
 
     # Generate code for graph nodes.
     cg_mapper = CodeGenMapper()
@@ -960,10 +1129,14 @@ def generate_loopy(result: Union[Array, DictOfNamedArrays],
 
     # Generate code for outputs.
     for name in compute_order:
-        expr = outputs[name]
-        insn_id = add_store(name, expr, cg_mapper(expr, state), state)
+        expr = stores[name]
+
+        insn_id = add_store(name, expr, cg_mapper(expr, state), state,
+                output_to_temporary=name not in outputnames)
         # replace "expr" with the created stored variable
         state.results[expr] = StoredResult(name, expr.ndim, frozenset([insn_id]))
+
+    assert len(state.preemptive_stores) == 0
 
     return target.bind_program(
             program=state.program,

@@ -204,7 +204,7 @@ class DependencyMapper(Mapper):
 
     def map_loopyfunction_result(self, expr: LoopyFunctionResult) -> FrozenSet[str]:
         return self.combine(frozenset([expr]), *(self.rec(bnd)
-                                                 for bnd in expr.bindings.values()))
+            for bnd in expr.loopyfunction.bindings.values()))
 
 
 # }}}
