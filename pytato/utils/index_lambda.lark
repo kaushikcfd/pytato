@@ -1,0 +1,86 @@
+// Coding style
+// 1. If 'foo' is s rule that is only used in bar, then name the rule as bar_foo.
+
+start: expression
+
+?expression : logical_or
+
+
+?logical_or : logical_and
+            | logical_or "or" logical_and             -> map_logical_or
+
+?logical_and : logical_not
+             | logical_and "and" logical_not          -> map_logical_and
+
+?logical_not : relation_op
+             | "not" logical_not                      -> map_logical_not
+
+?relational_op : bitwise_or
+               | relational_op "==" bitwise_or        -> map_relational_eq
+               | relational_op "!=" bitwise_or        -> map_relational_neq
+               | relational_op "<" bitwise_or         -> map_relational_lt
+               | relational_op ">" bitwise_or         -> map_relational_gt
+               | relational_op "<=" bitwise_or        -> map_relational_le
+               | relational_op ">=" bitwise_or        -> map_relational_ge
+
+?bitwise_or : bitwise_xor
+            | bitwise_or "|" bitwise_xor              -> map_bitwise_or
+
+
+?bitwise_xor : bitwise_and
+             | bitwise_xor "|" bitwise_and            -> map_bitwise_xor
+
+?bitwise_and : shift
+             | bitwise_and "&" shift                  -> map_bitwise_and
+
+?shift : sum_like
+       | shift "<<" sum_like                          -> map_left_shift
+       | shift ">>" sum_like                          -> map_right_shift
+
+?sum_like : product_like
+          | sum_like "+" product_like                 -> map_addition
+          | sum_like "-" product_like                 -> map_subtraction
+
+?product_like : unary_op
+              | product_like "*" unary_op             -> map_product
+              | product_like "/" unary_op             -> map_division
+              | product_like "//" unary_op            -> map_floor_div
+              | product_like "%" unary_op             -> map_modulo
+
+?unary_op : power
+          | "+" unary_op                              -> map_plus
+          | "-" unary_op                              -> map_neg
+
+?power : atom
+       | atom "**" power                              -> map_power
+
+?atom : literal
+      | call
+      | variable
+      | subscript
+      | "(" expression ")"                            -> map_parens
+
+variable : ID                                         -> map_variable
+
+literal : INT                                         -> map_literal_int
+        | FLOAT                                       -> map_literal_float
+
+subscript : variable "[" subscript_indices "]"        -> map_subscript
+subscript_indices: expression (",")?                  -> map_subscript_index
+                 | expression "," (expression ",")*   -> map_subscript_indices
+
+
+call : variable "(" call_args ")"                     -> map_call
+call_args:                                            -> map_empty_arg
+         | expression (",")?                          -> map_arg
+         | expression "," (expression ",")*           -> map_args
+
+%import common.CNAME             -> ID
+%import common.INT
+%import common.FLOAT
+%import common.WS_INLINE
+
+%ignore WS_INLINE
+
+
+// vim:fdm=marker
