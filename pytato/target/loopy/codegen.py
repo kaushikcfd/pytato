@@ -31,10 +31,11 @@ import re
 import pytato.scalar_expr as scalar_expr
 import pymbolic.primitives as prim
 from pymbolic import var
+from contextlib import contextmanager
 
 from typing import (
         Union, Optional, Mapping, Dict, Tuple, FrozenSet, Set, Callable,
-        Any, List)
+        Any, List, Iterator)
 
 
 from pytato.array import (Array, DictOfNamedArrays, ShapeType, IndexLambda,
@@ -139,6 +140,14 @@ class LoopyExpressionContext(object):
 
     def update_depends_on(self, other: FrozenSet[str]) -> None:
         self._depends_on = self._depends_on | other
+
+    @contextmanager
+    def swapped_reduction_bounds(self, bounds: ReductionBounds
+                                 ) -> Iterator[None]:
+        old_bounds = self.reduction_bounds
+        self.reduction_bounds = bounds
+        yield
+        self.reduction_bounds = old_bounds
 
 
 class ImplementedResult(object):
@@ -573,13 +582,10 @@ class InlinedExpressionGenMapper(scalar_expr.IdentityMapper):
                     state.var_name_gen(f"_pt_{expr.op}" + old_name))
                 for old_name in expr.bounds}
 
-        inner_expr = self.rec(expr.inner_expr,
-                              LoopyExpressionContext(
-                                  state=state,
-                                  _depends_on=expr_context.depends_on,
-                                  local_namespace=expr_context.local_namespace,
-                                  num_indices=expr_context.num_indices,
-                                  reduction_bounds=expr.bounds))  # type: ignore
+        # type-ignore-reason: passed 'Mapping', expected 'Dict'
+        with expr_context.swapped_reduction_bounds(expr.bounds):  # type: ignore
+            inner_expr = self.rec(expr.inner_expr, expr_context)
+
         inner_expr = loopy_substitute(inner_expr, unique_names_mapping)
 
         try:
